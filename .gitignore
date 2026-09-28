@@ -33,3 +33,5 @@ models/*.joblib
 
 # Generated datasets
 data/*.csv
+
+test_fraud_risk.db
