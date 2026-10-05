@@ -1,15 +1,26 @@
-from pathlib import Path
 import json
+from pathlib import Path
 
 import joblib
 import pandas as pd
+
+from ml.features import (
+    MODEL_FEATURES,
+    RAW_FEATURES,
+    create_ml_features,
+)
 
 
 # =========================================================
 # Paths
 # =========================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parent
+    .parent
+)
 
 MODEL_PATH = (
     PROJECT_ROOT
@@ -34,101 +45,63 @@ class MLService:
 
     Responsibilities:
 
-    1. Load the trained model artifact.
-    2. Load model metadata.
-    3. Validate required model features.
-    4. Generate fraud probabilities.
-    5. Apply the configured operating threshold.
-
-    The service does NOT train models.
+    - load the trained model
+    - load model metadata
+    - validate model/metadata compatibility
+    - build raw inference input
+    - call the shared feature transformer
+    - generate fraud probability
+    - apply the frozen operating threshold
     """
 
-    def __init__(
-        self,
-        model_path: Path = MODEL_PATH,
-        metadata_path: Path = METADATA_PATH,
-    ):
-        self.model_path = model_path
-        self.metadata_path = metadata_path
-
+    def __init__(self) -> None:
         self.model = None
         self.metadata = None
 
+        self.model_name = None
         self.threshold = None
         self.feature_names = None
-        self.model_name = None
 
         self._load_artifacts()
+
 
     # =====================================================
     # Artifact Loading
     # =====================================================
 
-    def _load_artifacts(self):
+    def _load_artifacts(self) -> None:
         """
-        Load the serialized sklearn pipeline and
-        corresponding metadata.
+        Load the trained model and its metadata once when
+        the service is initialized.
         """
 
-        if not self.model_path.exists():
+        if not MODEL_PATH.exists():
             raise FileNotFoundError(
-                "Fraud model artifact was not found: "
-                f"{self.model_path}\n"
-                "Run: python -m ml.finalize_model"
+                "Fraud model artifact was not found at "
+                f"{MODEL_PATH}. "
+                "Run `python -m ml.finalize_model` first."
             )
 
-        if not self.metadata_path.exists():
+        if not METADATA_PATH.exists():
             raise FileNotFoundError(
-                "Fraud model metadata was not found: "
-                f"{self.metadata_path}\n"
-                "Run: python -m ml.finalize_model"
+                "Fraud model metadata was not found at "
+                f"{METADATA_PATH}. "
+                "Run `python -m ml.finalize_model` first."
             )
-
-        # -------------------------------------------------
-        # Load model
-        # -------------------------------------------------
 
         self.model = joblib.load(
-            self.model_path
+            MODEL_PATH
         )
 
-        # -------------------------------------------------
-        # Load metadata
-        # -------------------------------------------------
-
-        with open(
-            self.metadata_path,
+        with METADATA_PATH.open(
             "r",
             encoding="utf-8",
         ) as metadata_file:
-
             self.metadata = json.load(
                 metadata_file
             )
 
-        # -------------------------------------------------
-        # Validate metadata
-        # -------------------------------------------------
-
-        required_metadata = [
-            "model_name",
-            "threshold",
-            "feature_count",
-            "feature_names",
-        ]
-
-        missing_metadata = [
-            field
-            for field in required_metadata
-            if field not in self.metadata
-        ]
-
-        if missing_metadata:
-            raise ValueError(
-                "Model metadata is missing "
-                "required fields: "
-                f"{missing_metadata}"
-            )
+        self._validate_metadata()
 
         self.model_name = (
             self.metadata["model_name"]
@@ -142,24 +115,141 @@ class MLService:
             self.metadata["feature_names"]
         )
 
-        expected_feature_count = int(
-            self.metadata["feature_count"]
+        self._validate_feature_contract()
+
+
+    # =====================================================
+    # Metadata Validation
+    # =====================================================
+
+    def _validate_metadata(self) -> None:
+        """
+        Ensure required production metadata exists.
+        """
+
+        required_fields = {
+            "model_name",
+            "threshold",
+            "feature_count",
+            "feature_names",
+        }
+
+        missing_fields = (
+            required_fields
+            - set(self.metadata)
+        )
+
+        if missing_fields:
+            missing_text = ", ".join(
+                sorted(missing_fields)
+            )
+
+            raise ValueError(
+                "Model metadata is missing "
+                f"required fields: {missing_text}"
+            )
+
+
+    # =====================================================
+    # Feature Contract Validation
+    # =====================================================
+
+    def _validate_feature_contract(
+        self,
+    ) -> None:
+        """
+        Verify that the model metadata and application
+        feature definitions agree.
+
+        This protects production inference from silently
+        using a different number or ordering of features.
+        """
+
+        metadata_feature_count = int(
+            self.metadata[
+                "feature_count"
+            ]
+        )
+
+        metadata_feature_names = list(
+            self.metadata[
+                "feature_names"
+            ]
         )
 
         if (
-            len(self.feature_names)
-            != expected_feature_count
+            metadata_feature_count
+            != len(
+                metadata_feature_names
+            )
         ):
             raise ValueError(
-                "Feature metadata is inconsistent. "
-                f"feature_count="
-                f"{expected_feature_count}, "
-                f"but feature_names contains "
-                f"{len(self.feature_names)} features."
+                "Model metadata feature_count "
+                "does not match feature_names."
             )
 
+        if (
+            metadata_feature_count
+            != len(MODEL_FEATURES)
+        ):
+            raise ValueError(
+                "Model metadata feature count "
+                "does not match the application "
+                "feature contract."
+            )
+
+        if (
+            metadata_feature_names
+            != MODEL_FEATURES
+        ):
+            raise ValueError(
+                "Model metadata feature order "
+                "does not match MODEL_FEATURES."
+            )
+
+
     # =====================================================
-    # Feature Engineering
+    # Raw Input Creation
+    # =====================================================
+
+    def _create_raw_feature_row(
+        self,
+        *,
+        amount: float,
+        account_age_days: int,
+        failed_transactions_24h: int,
+        is_international: bool,
+        hour: int,
+    ) -> pd.DataFrame:
+        """
+        Convert one API transaction into the raw DataFrame
+        expected by the shared feature transformer.
+
+        No engineered features are created here.
+        """
+
+        raw_data = {
+            "amount": [amount],
+            "account_age_days": [
+                account_age_days
+            ],
+            "failed_transactions_24h": [
+                failed_transactions_24h
+            ],
+            "is_international": [
+                is_international
+            ],
+            "hour": [hour],
+        }
+
+        return pd.DataFrame(
+            raw_data,
+            columns=RAW_FEATURES,
+        )
+
+
+    # =====================================================
+    # Feature Creation
     # =====================================================
 
     def _create_feature_row(
@@ -172,132 +262,47 @@ class MLService:
         hour: int,
     ) -> pd.DataFrame:
         """
-        Create the exact feature representation expected
-        by the production model.
+        Create the final model feature row.
 
-        IMPORTANT:
-        These engineered features must remain consistent
-        with ml/features.py.
+        Feature engineering is intentionally delegated to
+        ml.features.create_ml_features so training and
+        production inference use the same implementation.
         """
 
-        raw_features = {
-            "amount": float(amount),
-            "account_age_days":
-                int(account_age_days),
-            "failed_transactions_24h":
-                int(failed_transactions_24h),
-            "is_international":
-                int(is_international),
-            "hour":
-                int(hour),
-        }
-
-        # -------------------------------------------------
-        # Engineered features
-        #
-        # Must match ml/features.py exactly.
-        # -------------------------------------------------
-
-        engineered_features = {
-            "high_amount":
-                int(amount > 5000),
-
-            "night_transaction":
-                int(hour < 6),
-
-            "new_account":
-                int(account_age_days < 30),
-
-            "multiple_failures":
-                int(
-                    failed_transactions_24h
-                    >= 3
+        raw_features = (
+            self._create_raw_feature_row(
+                amount=amount,
+                account_age_days=(
+                    account_age_days
                 ),
-        }
-
-        feature_values = {
-            **raw_features,
-            **engineered_features,
-        }
-
-        # -------------------------------------------------
-        # Validate expected features
-        # -------------------------------------------------
-
-        missing_features = [
-            feature
-            for feature in self.feature_names
-            if feature not in feature_values
-        ]
-
-        if missing_features:
-            raise ValueError(
-                "Inference feature generation is "
-                "missing required model features: "
-                f"{missing_features}"
+                failed_transactions_24h=(
+                    failed_transactions_24h
+                ),
+                is_international=(
+                    is_international
+                ),
+                hour=hour,
             )
-
-        # -------------------------------------------------
-        # Explicitly order columns according to metadata.
-        #
-        # Never rely on dictionary insertion order for
-        # model feature alignment.
-        # -------------------------------------------------
-
-        ordered_features = {
-            feature:
-                feature_values[feature]
-            for feature
-            in self.feature_names
-        }
-
-        return pd.DataFrame(
-            [ordered_features],
-            columns=self.feature_names,
         )
 
-    # =====================================================
-    # Input Validation
-    # =====================================================
+        model_features = (
+            create_ml_features(
+                raw_features
+            )
+        )
 
-    @staticmethod
-    def _validate_inputs(
-        *,
-        amount: float,
-        account_age_days: int,
-        failed_transactions_24h: int,
-        hour: int,
-    ):
-        """
-        Basic domain validation.
-
-        FastAPI/Pydantic will eventually provide another
-        validation layer, but keeping the inference service
-        safe allows it to be used outside HTTP as well.
-        """
-
-        if amount < 0:
+        # Defense-in-depth check.
+        if (
+            list(model_features.columns)
+            != self.feature_names
+        ):
             raise ValueError(
-                "amount must be greater than "
-                "or equal to 0."
+                "Generated feature order does "
+                "not match model metadata."
             )
 
-        if account_age_days < 0:
-            raise ValueError(
-                "account_age_days must be greater "
-                "than or equal to 0."
-            )
+        return model_features
 
-        if failed_transactions_24h < 0:
-            raise ValueError(
-                "failed_transactions_24h must be "
-                "greater than or equal to 0."
-            )
-
-        if not 0 <= hour <= 23:
-            raise ValueError(
-                "hour must be between 0 and 23."
-            )
 
     # =====================================================
     # Prediction
@@ -313,26 +318,24 @@ class MLService:
         hour: int,
     ) -> dict:
         """
-        Generate fraud probability and operating decision.
+        Generate a fraud probability and apply the frozen
+        production operating threshold.
         """
 
-        self._validate_inputs(
-            amount=amount,
-            account_age_days=account_age_days,
-            failed_transactions_24h=
-                failed_transactions_24h,
-            hour=hour,
-        )
-
-        features = self._create_feature_row(
-            amount=amount,
-            account_age_days=
-                account_age_days,
-            failed_transactions_24h=
-                failed_transactions_24h,
-            is_international=
-                is_international,
-            hour=hour,
+        features = (
+            self._create_feature_row(
+                amount=amount,
+                account_age_days=(
+                    account_age_days
+                ),
+                failed_transactions_24h=(
+                    failed_transactions_24h
+                ),
+                is_international=(
+                    is_international
+                ),
+                hour=hour,
+            )
         )
 
         probabilities = (
@@ -342,80 +345,79 @@ class MLService:
         )
 
         fraud_probability = float(
-            probabilities[0, 1]
+            probabilities[0][1]
         )
 
-        decision = (
-            "REVIEW"
-            if fraud_probability
+        if (
+            fraud_probability
             >= self.threshold
-            else "APPROVE"
-        )
+        ):
+            decision = "REVIEW"
+
+        else:
+            decision = "APPROVE"
 
         return {
-            "model_name":
-                self.model_name,
-
-            "fraud_probability":
-                fraud_probability,
-
-            "threshold":
-                self.threshold,
-
-            "decision":
-                decision,
+            "model_name": (
+                self.model_name
+            ),
+            "fraud_probability": (
+                fraud_probability
+            ),
+            "threshold": (
+                self.threshold
+            ),
+            "decision": decision,
         }
 
+
     # =====================================================
-    # Service Information
+    # Model Information
     # =====================================================
 
     def get_model_info(
         self,
     ) -> dict:
         """
-        Return non-sensitive model configuration
-        information useful for diagnostics.
+        Return safe model metadata for API exposure.
         """
 
         return {
-            "model_name":
-                self.model_name,
-
-            "threshold":
-                self.threshold,
-
-            "feature_count":
-                len(
-                    self.feature_names
-                ),
-
-            "feature_names":
-                self.feature_names,
-
-            "max_review_rate":
+            "model_name": (
+                self.model_name
+            ),
+            "threshold": (
+                self.threshold
+            ),
+            "feature_count": len(
+                self.feature_names
+            ),
+            "feature_names": list(
+                self.feature_names
+            ),
+            "max_review_rate": (
                 self.metadata.get(
                     "max_review_rate"
-                ),
-
-            "training_rows":
+                )
+            ),
+            "training_rows": (
                 self.metadata.get(
                     "training_rows"
-                ),
-
-            "test_set_used_for_training":
+                )
+            ),
+            "test_set_used_for_training": (
                 self.metadata.get(
                     "test_set_used_for_training"
-                ),
+                )
+            ),
         }
 
 
 # =========================================================
-# Singleton Service
+# Application Singleton
 #
-# This object is created once when the module is imported.
-# The model is therefore loaded once per application
-# process instead of once per HTTP request.
+# The model is loaded once when the process starts rather
+# than once per API request.
 # =========================================================
 
 ml_service = MLService()
