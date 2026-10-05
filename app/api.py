@@ -1,24 +1,13 @@
 import asyncio
 import time
 
-from fastapi import (
-    Depends,
-    FastAPI,
-    HTTPException,
-    Query,
-)
+from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-import app.db_models
-
-from app.database import (
-    Base,
-    engine,
-    get_db,
-)
+from app.database import Base, engine, get_db
 from app.db_models import TransactionRecord
-from app.logger import get_logger
+from app.logger import logger
 from app.ml_service import ml_service
 from app.models import Transaction
 from app.risk_engine import RiskEngine
@@ -31,24 +20,14 @@ from app.schemas import (
 
 
 # =========================================================
-# Logger
-# =========================================================
-
-logger = get_logger(
-    __name__
-)
-
-
-# =========================================================
 # FastAPI Application
 # =========================================================
 
 app = FastAPI(
-    title="Fraud Risk Scoring API",
+    title="Fraud Risk Platform",
     description=(
-        "Production-style fraud risk scoring API "
-        "using machine learning and deterministic "
-        "risk rules."
+        "Fraud detection API using a trained machine-learning "
+        "model together with a deterministic rule-based risk engine."
     ),
     version="2.0.0",
 )
@@ -56,60 +35,60 @@ app = FastAPI(
 
 # =========================================================
 # Database Initialization
+#
+# create_all() is useful for creating tables in a completely
+# new database.
+#
+# Existing production schemas should be evolved using Alembic.
 # =========================================================
 
-Base.metadata.create_all(
-    bind=engine
-)
+Base.metadata.create_all(bind=engine)
 
 
 # =========================================================
-# Rule-Based Risk Engine
+# Services
 # =========================================================
 
 risk_engine = RiskEngine()
 
 
 # =========================================================
-# Root Endpoint
+# Root
 # =========================================================
 
 @app.get("/")
 def root():
+    """
+    Basic service information.
+    """
+
     return {
-        "service":
-            "Fraud Risk Scoring API",
-
-        "version":
-            "2.0.0",
-
-        "status":
-            "running",
-
-        "model":
-            ml_service.model_name,
+        "service": "Fraud Risk Platform",
+        "version": "2.0.0",
+        "status": "running",
+        "model": ml_service.model_name,
     }
 
 
 # =========================================================
-# Health Endpoint
+# Health Check
 # =========================================================
 
 @app.get("/health")
-def health_check():
+def health():
     """
-    Basic application health check.
+    Health endpoint used by monitoring systems,
+    containers, and deployment platforms.
     """
 
     return {
         "status": "healthy",
-        "model_loaded":
-            ml_service.model is not None,
+        "model_loaded": ml_service.model is not None,
     }
 
 
 # =========================================================
-# Model Information Endpoint
+# Model Information
 # =========================================================
 
 @app.get(
@@ -118,291 +97,185 @@ def health_check():
 )
 def model_info():
     """
-    Return information about the currently loaded
-    production fraud model.
-
-    This endpoint does not expose model weights.
+    Return metadata about the currently loaded fraud model.
     """
 
     return ml_service.get_model_info()
 
 
 # =========================================================
-# Fraud Prediction Endpoint
+# Fraud Prediction
 # =========================================================
 
 @app.post(
     "/predict",
     response_model=RiskResponse,
 )
-def predict_risk(
+def predict_transaction(
     request: TransactionRequest,
     db: Session = Depends(get_db),
 ):
     """
-    Generate an ML fraud probability and operating
-    decision.
+    Evaluate a transaction using:
 
-    The deterministic rule engine is also executed
-    so its result can be compared with the ML model.
+    1. The production ML model
+    2. The deterministic rule engine
 
-    The ML model is the primary decision source.
+    The ML decision is currently treated as the primary
+    application decision.
+
+    Both prediction paths are persisted independently for
+    auditing and future model/rule comparisons.
     """
 
     logger.info(
-        "Received prediction request "
-        "transaction_id=%s",
+        "Received prediction request for transaction %s",
         request.transaction_id,
     )
 
     try:
-
-        # =================================================
-        # 1. Convert API Request Into Domain Model
-        # =================================================
+        # -------------------------------------------------
+        # Build domain transaction
+        # -------------------------------------------------
 
         transaction = Transaction(
-            transaction_id=
-                request.transaction_id,
-
-            customer_id=
-                request.customer_id,
-
-            amount=
-                request.amount,
-
-            merchant=
-                request.merchant,
-
-            country=
-                request.country,
-
-            timestamp=
-                request.timestamp,
-
-            account_age_days=
-                request.account_age_days,
-
-            failed_transactions_24h=
-                request.failed_transactions_24h,
-
-            is_international=
-                request.is_international,
+            transaction_id=request.transaction_id,
+            customer_id=request.customer_id,
+            amount=request.amount,
+            merchant=request.merchant,
+            country=request.country,
+            timestamp=request.timestamp,
+            account_age_days=request.account_age_days,
+            failed_transactions_24h=(
+                request.failed_transactions_24h
+            ),
+            is_international=request.is_international,
         )
 
-        # =================================================
-        # 2. Run Existing Rule Engine
-        #
-        # This remains useful as:
-        #
-        # - deterministic baseline
-        # - comparison mechanism
-        # - explainability aid
-        # =================================================
+        # -------------------------------------------------
+        # Rule Engine
+        # -------------------------------------------------
 
-        rule_result = (
-            risk_engine.calculate_risk(
-                transaction
-            )
+        rule_result = risk_engine.calculate_risk(
+            transaction
         )
 
-        # =================================================
-        # 3. Run Production ML Model
+        # -------------------------------------------------
+        # ML Model
         #
-        # hour is derived from timestamp because that is
-        # how the ML training dataset represented time.
-        # =================================================
+        # The hour feature is derived from the transaction
+        # timestamp instead of being supplied independently
+        # by the API client.
+        # -------------------------------------------------
 
         ml_result = ml_service.predict(
-            amount=
-                request.amount,
-
-            account_age_days=
-                request.account_age_days,
-
-            failed_transactions_24h=
-                request.failed_transactions_24h,
-
-            is_international=
-                request.is_international,
-
-            hour=
-                request.timestamp.hour,
+            amount=request.amount,
+            account_age_days=request.account_age_days,
+            failed_transactions_24h=(
+                request.failed_transactions_24h
+            ),
+            is_international=request.is_international,
+            hour=request.timestamp.hour,
         )
 
-        logger.info(
-            "ML prediction transaction_id=%s "
-            "probability=%.4f "
-            "threshold=%.2f "
-            "decision=%s",
-            request.transaction_id,
-            ml_result[
-                "fraud_probability"
-            ],
-            ml_result[
-                "threshold"
-            ],
-            ml_result[
-                "decision"
-            ],
-        )
-
-        # =================================================
-        # 4. Build API Response
-        # =================================================
-
-        response = RiskResponse(
-            transaction_id=
-                request.transaction_id,
-
-            model_name=
-                ml_result[
-                    "model_name"
-                ],
-
-            fraud_probability=
-                ml_result[
-                    "fraud_probability"
-                ],
-
-            threshold=
-                ml_result[
-                    "threshold"
-                ],
-
-            decision=
-                ml_result[
-                    "decision"
-                ],
-
-            rule_risk_score=
-                rule_result[
-                    "risk_score"
-                ],
-
-            rule_decision=
-                rule_result[
-                    "decision"
-                ],
-
-            features=
-                rule_result[
-                    "features"
-                ],
-        )
-
-        # =================================================
-        # 5. Create Database Record
+        # -------------------------------------------------
+        # Persist Prediction
         #
-        # Current DB schema does not yet have ML-specific
-        # columns.
+        # Legacy fields remain populated temporarily for
+        # backward compatibility.
         #
-        # For now:
-        #
-        # risk_score -> rule-engine score
-        # decision   -> production ML decision
-        #
-        # Later we'll introduce proper model metadata
-        # columns using a database migration.
-        # =================================================
+        # New fields explicitly separate ML output from
+        # deterministic rule-engine output.
+        # -------------------------------------------------
 
-        db_record = TransactionRecord(
-            transaction_id=
-                request.transaction_id,
+        record = TransactionRecord(
+            transaction_id=request.transaction_id,
+            customer_id=request.customer_id,
+            amount=request.amount,
+            merchant=request.merchant,
+            country=request.country,
+            timestamp=request.timestamp,
+            account_age_days=request.account_age_days,
+            failed_transactions_24h=(
+                request.failed_transactions_24h
+            ),
+            is_international=request.is_international,
 
-            customer_id=
-                request.customer_id,
+            # Legacy fields
+            risk_score=rule_result["risk_score"],
+            decision=ml_result["decision"],
 
-            amount=
-                request.amount,
+            # ML audit fields
+            fraud_probability=(
+                ml_result["fraud_probability"]
+            ),
+            ml_decision=ml_result["decision"],
+            model_name=ml_result["model_name"],
+            model_threshold=ml_result["threshold"],
 
-            merchant=
-                request.merchant,
-
-            country=
-                request.country,
-
-            timestamp=
-                request.timestamp,
-
-            account_age_days=
-                request.account_age_days,
-
-            failed_transactions_24h=
-                request.failed_transactions_24h,
-
-            is_international=
-                request.is_international,
-
-            risk_score=
-                rule_result[
-                    "risk_score"
-                ],
-
-            decision=
-                ml_result[
-                    "decision"
-                ],
+            # Rule-engine audit fields
+            rule_risk_score=rule_result["risk_score"],
+            rule_decision=rule_result["decision"],
         )
 
-        # =================================================
-        # 6. Persist Prediction
-        # =================================================
-
-        db.add(
-            db_record
-        )
-
+        db.add(record)
         db.commit()
-
-        db.refresh(
-            db_record
-        )
+        db.refresh(record)
 
         logger.info(
-            "Transaction saved successfully "
-            "transaction_id=%s",
+            (
+                "Prediction completed "
+                "transaction_id=%s "
+                "fraud_probability=%.6f "
+                "ml_decision=%s "
+                "rule_score=%s "
+                "rule_decision=%s"
+            ),
             request.transaction_id,
+            ml_result["fraud_probability"],
+            ml_result["decision"],
+            rule_result["risk_score"],
+            rule_result["decision"],
         )
 
-        # =================================================
-        # 7. Return Response
-        # =================================================
+        # -------------------------------------------------
+        # API Response
+        # -------------------------------------------------
 
-        return response
+        return RiskResponse(
+            transaction_id=request.transaction_id,
+            model_name=ml_result["model_name"],
+            fraud_probability=(
+                ml_result["fraud_probability"]
+            ),
+            threshold=ml_result["threshold"],
+            decision=ml_result["decision"],
+            rule_risk_score=rule_result["risk_score"],
+            rule_decision=rule_result["decision"],
+            features=rule_result["features"],
+        )
 
-    # =====================================================
-    # Duplicate Transaction
-    # =====================================================
-
-    except IntegrityError as exc:
-
+    except IntegrityError:
         db.rollback()
 
         logger.warning(
-            "Duplicate transaction_id=%s",
+            "Duplicate transaction ID: %s",
             request.transaction_id,
         )
 
         raise HTTPException(
             status_code=409,
             detail=(
-                "Transaction ID already exists"
+                f"Transaction '{request.transaction_id}' "
+                "already exists."
             ),
-        ) from exc
-
-    # =====================================================
-    # Domain / ML Validation Error
-    # =====================================================
+        )
 
     except ValueError as exc:
-
         db.rollback()
 
         logger.warning(
-            "Invalid transaction "
-            "transaction_id=%s "
-            "error=%s",
+            "Invalid transaction %s: %s",
             request.transaction_id,
             exc,
         )
@@ -410,112 +283,88 @@ def predict_risk(
         raise HTTPException(
             status_code=400,
             detail=str(exc),
-        ) from exc
+        )
 
-    # =====================================================
-    # Unexpected Error
-    # =====================================================
+    except HTTPException:
+        db.rollback()
+        raise
 
-    except Exception as exc:
-
+    except Exception:
         db.rollback()
 
         logger.exception(
-            "Unexpected prediction error "
-            "transaction_id=%s",
+            "Prediction failed for transaction %s",
             request.transaction_id,
         )
 
         raise HTTPException(
             status_code=500,
-            detail="Internal server error",
-        ) from exc
+            detail="Internal prediction error.",
+        )
 
 
 # =========================================================
-# Transaction List Endpoint
+# List Transactions
 # =========================================================
 
 @app.get(
     "/transactions",
-    response_model=list[
-        TransactionRecordResponse
-    ],
+    response_model=list[TransactionRecordResponse],
 )
-def get_transactions(
-    decision: str | None = None,
-
-    min_amount: float | None = None,
-
+def list_transactions(
+    decision: str | None = Query(
+        default=None,
+        description="Filter by primary application decision.",
+    ),
+    min_amount: float | None = Query(
+        default=None,
+        ge=0,
+        description="Minimum transaction amount.",
+    ),
     limit: int = Query(
         default=10,
         ge=1,
         le=100,
     ),
-
     offset: int = Query(
         default=0,
         ge=0,
     ),
-
-    db: Session = Depends(
-        get_db
-    ),
+    db: Session = Depends(get_db),
 ):
     """
-    Return stored transactions with optional
-    filtering and pagination.
+    Return stored transactions with optional filtering
+    and pagination.
+
+    The legacy `decision` column currently represents the
+    primary ML-backed application decision.
     """
 
-    query = db.query(
-        TransactionRecord
-    )
-
-    # -----------------------------------------------------
-    # Optional Decision Filter
-    # -----------------------------------------------------
+    query = db.query(TransactionRecord)
 
     if decision is not None:
-
         query = query.filter(
-            TransactionRecord.decision
-            == decision.upper()
+            TransactionRecord.decision == decision
         )
-
-    # -----------------------------------------------------
-    # Optional Amount Filter
-    # -----------------------------------------------------
 
     if min_amount is not None:
-
         query = query.filter(
-            TransactionRecord.amount
-            >= min_amount
+            TransactionRecord.amount >= min_amount
         )
 
-    # -----------------------------------------------------
-    # Pagination
-    # -----------------------------------------------------
-
-    transactions = (
+    records = (
         query
-        .order_by(
-            TransactionRecord.id.desc()
-        )
-        .offset(
-            offset
-        )
-        .limit(
-            limit
-        )
+        .order_by(TransactionRecord.id.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
-    return transactions
+    return records
 
 
 # =========================================================
-# Transaction Lookup Endpoint
+# Get Transaction
 # =========================================================
 
 @app.get(
@@ -524,18 +373,15 @@ def get_transactions(
 )
 def get_transaction(
     transaction_id: str,
-    db: Session = Depends(
-        get_db
-    ),
+    db: Session = Depends(get_db),
 ):
     """
-    Return one transaction by transaction ID.
+    Return a single stored transaction including its
+    ML and rule-engine audit information.
     """
 
-    transaction = (
-        db.query(
-            TransactionRecord
-        )
+    record = (
+        db.query(TransactionRecord)
         .filter(
             TransactionRecord.transaction_id
             == transaction_id
@@ -543,58 +389,40 @@ def get_transaction(
         .first()
     )
 
-    if transaction is None:
-
+    if record is None:
         raise HTTPException(
             status_code=404,
-            detail="Transaction not found",
+            detail=(
+                f"Transaction '{transaction_id}' "
+                "was not found."
+            ),
         )
 
-    return transaction
+    return record
 
 
 # =========================================================
 # Blocking Demo
 # =========================================================
 
-@app.get(
-    "/blocking-demo"
-)
+@app.get("/blocking-demo")
 async def blocking_demo():
     """
-    Demonstrates what happens when blocking work
-    runs directly inside an async endpoint.
-    """
+    Demonstrates blocking work inside an async endpoint.
 
-    logger.info(
-        "Starting blocking demo"
-    )
+    This is intentionally bad for educational purposes.
+    time.sleep() blocks the event loop.
+    """
 
     start = time.perf_counter()
 
-    # Intentionally blocking.
     time.sleep(5)
 
-    duration = (
-        time.perf_counter()
-        - start
-    )
-
-    logger.info(
-        "Blocking demo completed "
-        "duration=%.2f seconds",
-        duration,
-    )
+    duration = time.perf_counter() - start
 
     return {
-        "type":
-            "blocking",
-
-        "duration_seconds":
-            round(
-                duration,
-                2,
-            ),
+        "type": "blocking",
+        "duration_seconds": round(duration, 2),
     }
 
 
@@ -602,40 +430,21 @@ async def blocking_demo():
 # Async Demo
 # =========================================================
 
-@app.get(
-    "/async-demo"
-)
+@app.get("/async-demo")
 async def async_demo():
     """
-    Demonstrates cooperative non-blocking waiting.
-    """
+    Demonstrates cooperative asynchronous waiting.
 
-    logger.info(
-        "Starting async demo"
-    )
+    asyncio.sleep() yields control back to the event loop.
+    """
 
     start = time.perf_counter()
 
     await asyncio.sleep(5)
 
-    duration = (
-        time.perf_counter()
-        - start
-    )
-
-    logger.info(
-        "Async demo completed "
-        "duration=%.2f seconds",
-        duration,
-    )
+    duration = time.perf_counter() - start
 
     return {
-        "type":
-            "non-blocking",
-
-        "duration_seconds":
-            round(
-                duration,
-                2,
-            ),
+        "type": "async",
+        "duration_seconds": round(duration, 2),
     }

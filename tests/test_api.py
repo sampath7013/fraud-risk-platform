@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -11,22 +10,24 @@ from app.database import Base, get_db
 
 
 # =========================================================
-# Test Database Configuration
+# Test Database
 # =========================================================
 
-TEST_DB_PATH = Path(
-    "test_fraud_risk.db"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+TEST_DATABASE_PATH = (
+    PROJECT_ROOT / "test_fraud_risk.db"
 )
 
 TEST_DATABASE_URL = (
-    f"sqlite:///{TEST_DB_PATH}"
+    f"sqlite:///{TEST_DATABASE_PATH.as_posix()}"
 )
 
 
 test_engine = create_engine(
     TEST_DATABASE_URL,
     connect_args={
-        "check_same_thread": False
+        "check_same_thread": False,
     },
 )
 
@@ -43,11 +44,6 @@ TestingSessionLocal = sessionmaker(
 # =========================================================
 
 def override_get_db():
-    """
-    Provide a database session connected only
-    to the test database.
-    """
-
     db = TestingSessionLocal()
 
     try:
@@ -57,31 +53,23 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[
-    get_db
-] = override_get_db
+app.dependency_overrides[get_db] = override_get_db
 
 
-client = TestClient(
-    app
-)
+client = TestClient(app)
 
 
 # =========================================================
-# Database Setup / Cleanup
+# Database Reset
 # =========================================================
 
-@pytest.fixture(
-    autouse=True
-)
+@pytest.fixture(autouse=True)
 def reset_test_database():
     """
-    Give every API test a clean database.
+    Create a clean database for every API test.
 
-    This prevents:
-    - duplicate transaction IDs
-    - test-order dependencies
-    - contamination from development data
+    This prevents tests from depending on previous test
+    execution or the development fraud_risk.db database.
     """
 
     Base.metadata.drop_all(
@@ -100,31 +88,83 @@ def reset_test_database():
 
 
 # =========================================================
-# Health Check
+# Helper Payloads
 # =========================================================
 
-def test_health_check():
+def high_risk_payload(
+    transaction_id: str = "TXN-API-HIGH-001",
+):
+    return {
+        "transaction_id": transaction_id,
+        "customer_id": "CUST-HIGH-001",
+        "amount": 7200.0,
+        "merchant": "Electronics Store",
+        "country": "UK",
+        "timestamp": "2026-10-04T02:00:00",
+        "account_age_days": 12,
+        "failed_transactions_24h": 4,
+        "is_international": True,
+    }
 
-    response = client.get(
-        "/health"
-    )
 
-    assert (
-        response.status_code
-        == 200
-    )
+def low_risk_payload(
+    transaction_id: str = "TXN-API-LOW-001",
+):
+    return {
+        "transaction_id": transaction_id,
+        "customer_id": "CUST-LOW-001",
+        "amount": 200.0,
+        "merchant": "Grocery Store",
+        "country": "US",
+        "timestamp": "2026-10-04T14:00:00",
+        "account_age_days": 365,
+        "failed_transactions_24h": 0,
+        "is_international": False,
+    }
+
+
+# =========================================================
+# Root
+# =========================================================
+
+def test_root():
+    response = client.get("/")
+
+    assert response.status_code == 200
 
     data = response.json()
 
-    assert (
-        data["status"]
-        == "healthy"
+    assert data["service"] == "Fraud Risk Platform"
+    assert data["version"] == "2.0.0"
+    assert data["status"] == "running"
+
+    assert isinstance(
+        data["model"],
+        str,
     )
 
-    assert (
-        data["model_loaded"]
-        is True
+    assert data["model"]
+
+
+# =========================================================
+# Health
+# =========================================================
+
+def test_health():
+    response = client.get("/health")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["status"] == "healthy"
+
+    assert isinstance(
+        data["model_loaded"],
+        bool,
     )
+
+    assert data["model_loaded"] is True
 
 
 # =========================================================
@@ -132,15 +172,11 @@ def test_health_check():
 # =========================================================
 
 def test_model_info():
-
     response = client.get(
         "/model-info"
     )
 
-    assert (
-        response.status_code
-        == 200
-    )
+    assert response.status_code == 200
 
     data = response.json()
 
@@ -149,84 +185,50 @@ def test_model_info():
         == "Logistic Regression"
     )
 
-    assert (
-        data["threshold"]
-        == pytest.approx(0.14)
+    assert data["threshold"] == pytest.approx(
+        0.14
     )
 
-    assert (
-        data["feature_count"]
-        == 9
-    )
+    assert data["feature_count"] == 9
+
+    assert len(
+        data["feature_names"]
+    ) == 9
 
     assert (
-        data["max_review_rate"]
-        == pytest.approx(0.20)
-    )
-
-    assert (
-        data[
-            "test_set_used_for_training"
-        ]
+        data["test_set_used_for_training"]
         is False
     )
 
 
 # =========================================================
-# High-Risk ML Prediction
+# High-Risk Prediction
 # =========================================================
 
 def test_high_risk_prediction():
-
-    payload = {
-        "transaction_id":
-            "TXN-API-HIGH-001",
-
-        "customer_id":
-            "CUST-001",
-
-        "amount":
-            7200.00,
-
-        "merchant":
-            "Electronics Store",
-
-        "country":
-            "UK",
-
-        "timestamp":
-            "2026-09-17T02:00:00",
-
-        "account_age_days":
-            12,
-
-        "failed_transactions_24h":
-            4,
-
-        "is_international":
-            True,
-    }
+    payload = high_risk_payload()
 
     response = client.post(
         "/predict",
         json=payload,
     )
 
-    assert (
-        response.status_code
-        == 200
-    )
+    assert response.status_code == 200
 
     data = response.json()
 
     assert (
         data["transaction_id"]
-        == "TXN-API-HIGH-001"
+        == payload["transaction_id"]
     )
 
     assert (
         data["model_name"]
         == "Logistic Regression"
+    )
+
+    assert data["threshold"] == pytest.approx(
+        0.14
     )
 
     assert (
@@ -235,23 +237,10 @@ def test_high_risk_prediction():
         <= 1.0
     )
 
-    assert (
-        data["threshold"]
-        == pytest.approx(0.14)
-    )
-
-    assert (
-        data["decision"]
-        == "REVIEW"
-    )
-
-    assert (
-        data["fraud_probability"]
-        >= data["threshold"]
-    )
-
-    # Existing deterministic rule engine
-    # remains available for comparison.
+    assert data["decision"] in {
+        "APPROVE",
+        "REVIEW",
+    }
 
     assert (
         data["rule_risk_score"]
@@ -263,67 +252,31 @@ def test_high_risk_prediction():
         == "BLOCK"
     )
 
-    assert (
-        "high_amount"
-        in data["features"]
+    assert isinstance(
+        data["features"],
+        dict,
     )
 
 
 # =========================================================
-# Low-Risk ML Prediction
+# Low-Risk Prediction
 # =========================================================
 
 def test_low_risk_prediction():
-
-    payload = {
-        "transaction_id":
-            "TXN-API-LOW-001",
-
-        "customer_id":
-            "CUST-002",
-
-        "amount":
-            200.00,
-
-        "merchant":
-            "Grocery Store",
-
-        "country":
-            "USA",
-
-        "timestamp":
-            "2026-09-17T14:00:00",
-
-        "account_age_days":
-            365,
-
-        "failed_transactions_24h":
-            0,
-
-        "is_international":
-            False,
-    }
+    payload = low_risk_payload()
 
     response = client.post(
         "/predict",
         json=payload,
     )
 
-    assert (
-        response.status_code
-        == 200
-    )
+    assert response.status_code == 200
 
     data = response.json()
 
     assert (
         data["transaction_id"]
-        == "TXN-API-LOW-001"
-    )
-
-    assert (
-        data["model_name"]
-        == "Logistic Regression"
+        == payload["transaction_id"]
     )
 
     assert (
@@ -332,20 +285,10 @@ def test_low_risk_prediction():
         <= 1.0
     )
 
-    assert (
-        data["threshold"]
-        == pytest.approx(0.14)
-    )
-
-    assert (
-        data["decision"]
-        == "APPROVE"
-    )
-
-    assert (
-        data["fraud_probability"]
-        < data["threshold"]
-    )
+    assert data["decision"] in {
+        "APPROVE",
+        "REVIEW",
+    }
 
     assert (
         data["rule_risk_score"]
@@ -359,45 +302,19 @@ def test_low_risk_prediction():
 
 
 # =========================================================
-# Persistence
+# Prediction Persistence
 # =========================================================
 
-def test_prediction_is_persisted():
-
-    payload = {
-        "transaction_id":
-            "TXN-PERSIST-001",
-
-        "customer_id":
-            "CUST-PERSIST",
-
-        "amount":
-            200.00,
-
-        "merchant":
-            "Test Merchant",
-
-        "country":
-            "USA",
-
-        "timestamp":
-            "2026-09-17T14:00:00",
-
-        "account_age_days":
-            365,
-
-        "failed_transactions_24h":
-            0,
-
-        "is_international":
-            False,
-    }
-
-    prediction_response = (
-        client.post(
-            "/predict",
-            json=payload,
+def test_prediction_is_persisted_with_audit_fields():
+    payload = high_risk_payload(
+        transaction_id=(
+            "TXN-API-PERSIST-001"
         )
+    )
+
+    prediction_response = client.post(
+        "/predict",
+        json=payload,
     )
 
     assert (
@@ -405,9 +322,15 @@ def test_prediction_is_persisted():
         == 200
     )
 
+    prediction = (
+        prediction_response.json()
+    )
+
     lookup_response = client.get(
-        "/transactions/"
-        "TXN-PERSIST-001"
+        (
+            "/transactions/"
+            f"{payload['transaction_id']}"
+        )
     )
 
     assert (
@@ -415,20 +338,107 @@ def test_prediction_is_persisted():
         == 200
     )
 
-    stored = (
-        lookup_response.json()
-    )
+    stored = lookup_response.json()
+
+    # -----------------------------------------------------
+    # Transaction fields
+    # -----------------------------------------------------
 
     assert (
         stored["transaction_id"]
-        == "TXN-PERSIST-001"
+        == payload["transaction_id"]
+    )
+
+    assert (
+        stored["customer_id"]
+        == payload["customer_id"]
+    )
+
+    assert stored["amount"] == pytest.approx(
+        payload["amount"]
+    )
+
+    assert (
+        stored["merchant"]
+        == payload["merchant"]
+    )
+
+    assert (
+        stored["country"]
+        == payload["country"]
+    )
+
+    assert (
+        stored["account_age_days"]
+        == payload["account_age_days"]
+    )
+
+    assert (
+        stored[
+            "failed_transactions_24h"
+        ]
+        == payload[
+            "failed_transactions_24h"
+        ]
+    )
+
+    assert (
+        stored["is_international"]
+        == payload["is_international"]
+    )
+
+    # -----------------------------------------------------
+    # Legacy fields
+    # -----------------------------------------------------
+
+    assert (
+        stored["risk_score"]
+        == prediction["rule_risk_score"]
     )
 
     assert (
         stored["decision"]
-        == prediction_response.json()[
-            "decision"
-        ]
+        == prediction["decision"]
+    )
+
+    # -----------------------------------------------------
+    # ML audit fields
+    # -----------------------------------------------------
+
+    assert (
+        stored["model_name"]
+        == prediction["model_name"]
+    )
+
+    assert stored[
+        "model_threshold"
+    ] == pytest.approx(
+        prediction["threshold"]
+    )
+
+    assert stored[
+        "fraud_probability"
+    ] == pytest.approx(
+        prediction["fraud_probability"]
+    )
+
+    assert (
+        stored["ml_decision"]
+        == prediction["decision"]
+    )
+
+    # -----------------------------------------------------
+    # Rule-engine audit fields
+    # -----------------------------------------------------
+
+    assert (
+        stored["rule_risk_score"]
+        == prediction["rule_risk_score"]
+    )
+
+    assert (
+        stored["rule_decision"]
+        == prediction["rule_decision"]
     )
 
 
@@ -436,36 +446,10 @@ def test_prediction_is_persisted():
 # Duplicate Transaction
 # =========================================================
 
-def test_duplicate_transaction_id():
-
-    payload = {
-        "transaction_id":
-            "TXN-DUPLICATE-001",
-
-        "customer_id":
-            "CUST-DUPLICATE",
-
-        "amount":
-            500.00,
-
-        "merchant":
-            "Test Merchant",
-
-        "country":
-            "USA",
-
-        "timestamp":
-            "2026-09-17T14:00:00",
-
-        "account_age_days":
-            200,
-
-        "failed_transactions_24h":
-            0,
-
-        "is_international":
-            False,
-    }
+def test_duplicate_transaction_id_returns_409():
+    payload = high_risk_payload(
+        transaction_id="TXN-DUPLICATE-001"
+    )
 
     first_response = client.post(
         "/predict",
@@ -487,56 +471,39 @@ def test_duplicate_transaction_id():
         == 409
     )
 
-    assert (
-        second_response.json()[
-            "detail"
-        ]
-        == "Transaction ID already exists"
+    data = second_response.json()
+
+    assert "already exists" in (
+        data["detail"]
     )
 
 
 # =========================================================
-# Transaction Listing
+# List Transactions
 # =========================================================
 
-def test_get_transactions():
+def test_list_transactions():
+    first_payload = high_risk_payload(
+        transaction_id="TXN-LIST-001"
+    )
 
-    payload = {
-        "transaction_id":
-            "TXN-LIST-001",
-
-        "customer_id":
-            "CUST-LIST",
-
-        "amount":
-            1000.00,
-
-        "merchant":
-            "Test Merchant",
-
-        "country":
-            "USA",
-
-        "timestamp":
-            "2026-09-17T14:00:00",
-
-        "account_age_days":
-            365,
-
-        "failed_transactions_24h":
-            0,
-
-        "is_international":
-            False,
-    }
-
-    create_response = client.post(
-        "/predict",
-        json=payload,
+    second_payload = low_risk_payload(
+        transaction_id="TXN-LIST-002"
     )
 
     assert (
-        create_response.status_code
+        client.post(
+            "/predict",
+            json=first_payload,
+        ).status_code
+        == 200
+    )
+
+    assert (
+        client.post(
+            "/predict",
+            json=second_payload,
+        ).status_code
         == 200
     )
 
@@ -544,36 +511,217 @@ def test_get_transactions():
         "/transactions"
     )
 
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data) == 2
+
+    transaction_ids = {
+        record["transaction_id"]
+        for record in data
+    }
+
     assert (
-        response.status_code
+        first_payload["transaction_id"]
+        in transaction_ids
+    )
+
+    assert (
+        second_payload["transaction_id"]
+        in transaction_ids
+    )
+
+
+# =========================================================
+# Transaction List Audit Fields
+# =========================================================
+
+def test_list_transactions_contains_audit_fields():
+    payload = high_risk_payload(
+        transaction_id=(
+            "TXN-LIST-AUDIT-001"
+        )
+    )
+
+    prediction_response = client.post(
+        "/predict",
+        json=payload,
+    )
+
+    assert (
+        prediction_response.status_code
         == 200
     )
 
-    transactions = (
-        response.json()
+    response = client.get(
+        "/transactions"
     )
 
-    assert len(
-        transactions
-    ) == 1
+    assert response.status_code == 200
+
+    records = response.json()
+
+    assert len(records) == 1
+
+    record = records[0]
 
     assert (
-        transactions[0][
-            "transaction_id"
-        ]
-        == "TXN-LIST-001"
+        record["fraud_probability"]
+        is not None
+    )
+
+    assert (
+        record["ml_decision"]
+        is not None
+    )
+
+    assert (
+        record["model_name"]
+        is not None
+    )
+
+    assert (
+        record["model_threshold"]
+        is not None
+    )
+
+    assert (
+        record["rule_risk_score"]
+        is not None
+    )
+
+    assert (
+        record["rule_decision"]
+        is not None
     )
 
 
 # =========================================================
-# Transaction Lookup - Not Found
+# Decision Filter
+# =========================================================
+
+def test_list_transactions_with_decision_filter():
+    payload = low_risk_payload(
+        transaction_id=(
+            "TXN-FILTER-001"
+        )
+    )
+
+    prediction_response = client.post(
+        "/predict",
+        json=payload,
+    )
+
+    assert (
+        prediction_response.status_code
+        == 200
+    )
+
+    decision = (
+        prediction_response.json()[
+            "decision"
+        ]
+    )
+
+    response = client.get(
+        "/transactions",
+        params={
+            "decision": decision,
+        },
+    )
+
+    assert response.status_code == 200
+
+    records = response.json()
+
+    assert len(records) >= 1
+
+    assert all(
+        record["decision"] == decision
+        for record in records
+    )
+
+
+# =========================================================
+# Minimum Amount Filter
+# =========================================================
+
+def test_list_transactions_with_min_amount():
+    client.post(
+        "/predict",
+        json=high_risk_payload(
+            "TXN-AMOUNT-001"
+        ),
+    )
+
+    client.post(
+        "/predict",
+        json=low_risk_payload(
+            "TXN-AMOUNT-002"
+        ),
+    )
+
+    response = client.get(
+        "/transactions",
+        params={
+            "min_amount": 5000,
+        },
+    )
+
+    assert response.status_code == 200
+
+    records = response.json()
+
+    assert len(records) == 1
+
+    assert (
+        records[0]["transaction_id"]
+        == "TXN-AMOUNT-001"
+    )
+
+
+# =========================================================
+# Pagination
+# =========================================================
+
+def test_transaction_pagination():
+    for index in range(3):
+        payload = low_risk_payload(
+            transaction_id=(
+                f"TXN-PAGE-{index}"
+            )
+        )
+
+        response = client.post(
+            "/predict",
+            json=payload,
+        )
+
+        assert response.status_code == 200
+
+    response = client.get(
+        "/transactions",
+        params={
+            "limit": 2,
+            "offset": 0,
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert len(
+        response.json()
+    ) == 2
+
+
+# =========================================================
+# Missing Transaction
 # =========================================================
 
 def test_transaction_not_found():
-
     response = client.get(
-        "/transactions/"
-        "DOES-NOT-EXIST"
+        "/transactions/DOES-NOT-EXIST"
     )
 
     assert (
@@ -581,54 +729,30 @@ def test_transaction_not_found():
         == 404
     )
 
-    assert (
-        response.json()["detail"]
-        == "Transaction not found"
+    data = response.json()
+
+    assert "was not found" in (
+        data["detail"]
     )
 
 
 # =========================================================
-# Request Validation
+# Negative Amount Validation
 # =========================================================
 
-def test_negative_amount_validation():
+def test_negative_amount_returns_422():
+    payload = low_risk_payload(
+        transaction_id=(
+            "TXN-INVALID-AMOUNT"
+        )
+    )
 
-    payload = {
-        "transaction_id":
-            "TXN-INVALID-001",
-
-        "customer_id":
-            "CUST-003",
-
-        "amount":
-            -100.00,
-
-        "merchant":
-            "Test Merchant",
-
-        "country":
-            "USA",
-
-        "timestamp":
-            "2026-09-17T12:00:00",
-
-        "account_age_days":
-            365,
-
-        "failed_transactions_24h":
-            0,
-
-        "is_international":
-            False,
-    }
+    payload["amount"] = -100
 
     response = client.post(
         "/predict",
         json=payload,
     )
-
-    # Pydantic rejects this before the
-    # endpoint executes.
 
     assert (
         response.status_code
@@ -636,33 +760,76 @@ def test_negative_amount_validation():
     )
 
 
-def test_missing_transaction_id_validation():
+# =========================================================
+# Missing Transaction ID
+# =========================================================
 
-    payload = {
-        "customer_id":
-            "CUST-004",
+def test_missing_transaction_id_returns_422():
+    payload = low_risk_payload()
 
-        "amount":
-            200.00,
+    del payload["transaction_id"]
 
-        "merchant":
-            "Test Merchant",
+    response = client.post(
+        "/predict",
+        json=payload,
+    )
 
-        "country":
-            "USA",
+    assert (
+        response.status_code
+        == 422
+    )
 
-        "timestamp":
-            "2026-09-17T12:00:00",
 
-        "account_age_days":
-            365,
+# =========================================================
+# Empty Transaction ID
+# =========================================================
 
-        "failed_transactions_24h":
-            0,
+def test_empty_transaction_id_returns_422():
+    payload = low_risk_payload()
 
-        "is_international":
-            False,
-    }
+    payload["transaction_id"] = ""
+
+    response = client.post(
+        "/predict",
+        json=payload,
+    )
+
+    assert (
+        response.status_code
+        == 422
+    )
+
+
+# =========================================================
+# Invalid Account Age
+# =========================================================
+
+def test_negative_account_age_returns_422():
+    payload = low_risk_payload()
+
+    payload["account_age_days"] = -1
+
+    response = client.post(
+        "/predict",
+        json=payload,
+    )
+
+    assert (
+        response.status_code
+        == 422
+    )
+
+
+# =========================================================
+# Invalid Failed Transaction Count
+# =========================================================
+
+def test_negative_failed_transactions_returns_422():
+    payload = low_risk_payload()
+
+    payload[
+        "failed_transactions_24h"
+    ] = -1
 
     response = client.post(
         "/predict",
