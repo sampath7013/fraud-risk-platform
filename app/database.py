@@ -1,27 +1,37 @@
+import os
+
 from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 
-DATABASE_URL = "sqlite:///./fraud_risk.db"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///./fraud_risk.db",
+)
+
+
+connect_args = {}
+
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {
+        "check_same_thread": False,
+    }
 
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={
-        "check_same_thread": False,
-    },
+    connect_args=connect_args,
 )
 
 
 SessionLocal = sessionmaker(
-    bind=engine,
-    autoflush=False,
     autocommit=False,
+    autoflush=False,
+    bind=engine,
 )
 
 
-class Base(DeclarativeBase):
-    pass
+Base = declarative_base()
 
 
 def get_db():
@@ -29,5 +39,6 @@ def get_db():
 
     try:
         yield db
+
     finally:
         db.close()

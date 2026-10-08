@@ -1,0 +1,22 @@
+
+services:
+  fraud-risk-api:
+    image: fraud-risk-platform:1.1
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    ports:
+      - "8001:8000"
+
+    environment:
+      DATABASE_URL: "sqlite:////data/fraud_risk.db"
+
+    volumes:
+      - fraud-risk-data:/data
+
+    restart: unless-stopped
+
+volumes:
+  fraud-risk-data:
+    external: true
