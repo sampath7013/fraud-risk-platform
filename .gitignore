@@ -35,3 +35,8 @@ models/*.joblib
 data/*.csv
 
 test_fraud_risk.db
+# MLflow local state
+mlflow.db
+mlflow.db-*
+mlartifacts/
+mlruns/

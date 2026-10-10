@@ -9,3 +9,4 @@ scikit-learn
 joblib
 xgboost
 alembic
+mlflow==3.17.0
